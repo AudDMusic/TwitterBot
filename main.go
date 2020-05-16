@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"github.com/dghubble/go-twitter/twitter"
 	"github.com/dghubble/oauth1"
+	"github.com/getsentry/raven-go"
 	"io"
 	"io/ioutil"
 	"log"
@@ -13,6 +14,8 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"runtime"
+	"strings"
 	"syscall"
 )
 
@@ -57,7 +60,7 @@ func RecognizeByUrl(url, Return, apiToken string) []byte {
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 	client := &http.Client{}
 	resp, err := client.Do(req)
-	if capture(err) {
+	if err != nil {
 		panic(err)
 	}
 	defer resp.Body.Close()
@@ -65,6 +68,14 @@ func RecognizeByUrl(url, Return, apiToken string) []byte {
 	return respBody
 }
 
+func ContainsAnyString(s string, subs []string) bool {
+	for _, sub := range subs {
+		if strings.Contains(s, sub) {
+			return true
+		}
+	}
+	return false
+}
 func main(){
 	var err error
 	config := oauth1.NewConfig("", "")
@@ -103,10 +114,19 @@ func main(){
 					}
 				}
 			}
+			if !foundMedia && tweet.Entities != nil {
+				if len(tweet.Entities.Urls) > 0 {
+					for _, link := range tweet.Entities.Urls {
+						if ContainsAnyString(link.ExpandedURL, []string{"instagram", "tiktok", "facebook"}) {
+							url = link.ExpandedURL
+						}
+					}
+				}
+			}
 			if tweet.InReplyToStatusID == 0 || foundMedia {
 				break
 			}
-			tweet, _, err = client.Statuses.Show(tweet.InReplyToStatusID, nil)
+			tweet, _, err = client.Statuses.Show(tweet.InReplyToStatusID, &twitter.StatusShowParams{TweetMode: "extended"})
 			if capture(err) {
 				return
 			}
@@ -117,16 +137,17 @@ func main(){
 			fmt.Printf("It's reply to tweet from @%s : %s\n", tweet.User.ScreenName, jsonRepresentation)
 		}
 		if url != "" {
-			result = Recognize(nil, url, "timecode,song_link_nm", "")
+			fmt.Println("Recognizing from url ", url)
+			result = Recognize(nil, url, "", "")
 			tweet, _, err = client.Statuses.Show(tweet.ID, &twitter.StatusShowParams{TweetMode: "extended"})
 			if capture(err) {
 				return
 			}
 			if result.Status == "success" {
 				if result.Result.Title != "" {
-					status := fmt.Sprintf("@%s It's %s - %s. Listen: %s [plays on %s]",
+					status := fmt.Sprintf("@%s Recognized! It's %s - %s\n\nListen: %s [plays on %s]",
 						replyTo, result.Result.Artist, result.Result.Title, result.Result.SongLink, result.Result.TimeCode)
-					_, _, err = client.Statuses.Update(status, &twitter.StatusUpdateParams{InReplyToStatusID: replyToTweet})
+					tweet, _, err = client.Statuses.Update(status, &twitter.StatusUpdateParams{InReplyToStatusID: replyToTweet})
 					if capture(err) {
 						return
 					}
@@ -153,7 +174,7 @@ func main(){
 		StallWarnings: twitter.Bool(true),
 	}
 	stream, err := client.Streams.Filter(filterParams)
-	if capture(err) {
+	if err != nil {
 		log.Println(err)
 	}
 	go raven.CapturePanic(func(){ demux.HandleChan(stream.Messages) }, nil)
@@ -168,10 +189,21 @@ func main(){
 }
 
 
+func init() {
+	err := raven.SetDSN("")
+	if err != nil {
+		panic(err)
+	}
+}
+
 func capture(err error) bool {
 	if err == nil {
 		return false
 	}
-	/* */
+	_, file, no, ok := runtime.Caller(1)
+	if ok {
+		err = fmt.Errorf("%v from %s#%d", err, file, no)
+	}
+	go raven.CaptureError(err, nil)
 	return true
 }
