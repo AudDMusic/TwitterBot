@@ -1,72 +1,19 @@
 package main
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
+	"github.com/AudDMusic/audd-go"
 	"github.com/dghubble/go-twitter/twitter"
 	"github.com/dghubble/oauth1"
 	"github.com/getsentry/raven-go"
-	"io"
-	"io/ioutil"
 	"log"
-	"mime/multipart"
-	"net/http"
 	"os"
 	"os/signal"
 	"runtime"
 	"strings"
 	"syscall"
 )
-
-type AudDResponse struct {
-	Status string `json:"status"`
-	Error  struct {
-		ErrorCode    int    `json:"error_code"`
-		ErrorMessage string `json:"error_message"`
-	} `json:"error"`
-	Result SongInfo `json:"result"`
-}
-
-type SongInfo struct {
-	Artist      string `json:"artist"`
-	Title       string `json:"title"`
-	Album       string `json:"album"`
-	ReleaseDate string `json:"release_date"`
-	Label       string `json:"label"`
-	Underground bool   `json:"underground"`
-	TimeCode    string `json:"timecode"`
-	SongLink string    `json:"song_link"`
-}
-
-func Recognize(reader io.Reader, url, Return, apiToken string) AudDResponse {
-	var apiResponse []byte
-	if reader == nil {
-		apiResponse = RecognizeByUrl(url, Return, apiToken)
-	}
-	var result AudDResponse
-	json.Unmarshal(apiResponse, &result)
-	return result
-}
-func RecognizeByUrl(url, Return, apiToken string) []byte {
-	params := map[string]string{"api_token": apiToken, "url": url, "return": Return}
-	body := &bytes.Buffer{}
-	writer := multipart.NewWriter(body)
-	for key, val := range params {
-		_ = writer.WriteField(key, val)
-	}
-	writer.Close()
-	req, _ := http.NewRequest("POST", "https://api.audd.io/", body)
-	req.Header.Set("Content-Type", writer.FormDataContentType())
-	client := &http.Client{}
-	resp, err := client.Do(req)
-	if err != nil {
-		panic(err)
-	}
-	defer resp.Body.Close()
-	respBody, _ := ioutil.ReadAll(resp.Body)
-	return respBody
-}
 
 func ContainsAnyString(s string, subs []string) bool {
 	for _, sub := range subs {
@@ -80,9 +27,10 @@ func main(){
 	var err error
 	config := oauth1.NewConfig("", "")
 	token := oauth1.NewToken("", "")
-	httpClient := config.Client(oauth1.NoContext, token)
+	auddClient := audd.NewClient("")
+	// place your Twitter (consumer key, consumer secret, token, token secret) and AudD (api_token) credentials above
 
-	// Twitter client
+	httpClient := config.Client(oauth1.NoContext, token)
 	client := twitter.NewClient(httpClient)
 	demux := twitter.NewSwitchDemux()
 	demux.Tweet = func(tweet *twitter.Tweet) {
@@ -92,7 +40,7 @@ func main(){
 		}
 		fmt.Printf("New tweet from @%s : %s\n", tweet.User.ScreenName, jsonRepresentation)
 		url := ""
-		result := AudDResponse{}
+		result := audd.RecognitionResult{}
 		foundMedia := false
 		replyTo := tweet.User.ScreenName
 		replyToTweet := tweet.ID
@@ -138,25 +86,26 @@ func main(){
 		}
 		if url != "" {
 			fmt.Println("Recognizing from url ", url)
-			result = Recognize(nil, url, "", "")
+			result, err = auddClient.Recognize(url, "", nil)
+			if capture(err) {
+				return
+			}
 			tweet, _, err = client.Statuses.Show(tweet.ID, &twitter.StatusShowParams{TweetMode: "extended"})
 			if capture(err) {
 				return
 			}
-			if result.Status == "success" {
-				if result.Result.Title != "" {
-					status := fmt.Sprintf("@%s Recognized! It's %s - %s\n\nListen: %s [plays on %s]",
-						replyTo, result.Result.Artist, result.Result.Title, result.Result.SongLink, result.Result.TimeCode)
-					tweet, _, err = client.Statuses.Update(status, &twitter.StatusUpdateParams{InReplyToStatusID: replyToTweet})
-					if capture(err) {
-						return
-					}
-				} else {
-					status := fmt.Sprintf("@%s Couldn't recognize the song from this video :(", replyTo)
-					_, _, err = client.Statuses.Update(status, &twitter.StatusUpdateParams{InReplyToStatusID: replyToTweet})
-					if capture(err) {
-						return
-					}
+			if result.Title != "" {
+				status := fmt.Sprintf("@%s Recognized! It's %s - %s\n\nListen: %s [plays on %s]",
+					replyTo, result.Artist, result.Title, result.SongLink, result.Timecode)
+				tweet, _, err = client.Statuses.Update(status, &twitter.StatusUpdateParams{InReplyToStatusID: replyToTweet})
+				if capture(err) {
+					return
+				}
+			} else {
+				status := fmt.Sprintf("@%s Couldn't recognize the song from this video :(", replyTo)
+				_, _, err = client.Statuses.Update(status, &twitter.StatusUpdateParams{InReplyToStatusID: replyToTweet})
+				if capture(err) {
+					return
 				}
 			}
 		}
@@ -190,10 +139,10 @@ func main(){
 
 
 func init() {
-	err := raven.SetDSN("")
+	/*err := raven.SetDSN("")
 	if err != nil {
 		panic(err)
-	}
+	}*/
 }
 
 func capture(err error) bool {
@@ -204,6 +153,6 @@ func capture(err error) bool {
 	if ok {
 		err = fmt.Errorf("%v from %s#%d", err, file, no)
 	}
-	go raven.CaptureError(err, nil)
+	//go raven.CaptureError(err, nil)
 	return true
 }
